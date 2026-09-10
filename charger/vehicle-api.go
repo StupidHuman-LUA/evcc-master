@@ -1,0 +1,238 @@
+package charger
+
+import (
+	"encoding/json"
+	"errors"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/evcc-io/evcc/api"
+	"github.com/evcc-io/evcc/core/loadpoint"
+	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/request"
+)
+
+// VehicleApi is a charger implementation that uses the vehicle api
+// This is useful for "granny chargers" or simple chargers that can't be controlled directly
+type VehicleApi struct {
+	lp                     loadpoint.API
+	enabled                bool
+	geofenceEnabled        bool
+	lat, lon, radius       float64
+	cacheRefreshExpectedAt time.Time
+}
+
+func init() {
+	registry.Add("vehicle-api", NewVehicleApiFromConfig)
+}
+
+// NewVehicleApiFromConfig creates a new vehicle-api charger
+func NewVehicleApiFromConfig(other map[string]any) (api.Charger, error) {
+	cc := struct {
+		GeofenceEnabled bool    `mapstructure:"geofence_enabled"`
+		Lat             float64 `mapstructure:"lat"`
+		Lon             float64 `mapstructure:"lon"`
+		Radius          float64 `mapstructure:"radius"`
+	}{
+		Radius: 100, // Default 100 meter radius
+	}
+
+	if err := util.DecodeOther(other, &cc); err != nil {
+		return nil, err
+	}
+
+	c := &VehicleApi{
+		geofenceEnabled: cc.GeofenceEnabled,
+		lat:             cc.Lat,
+		lon:             cc.Lon,
+		radius:          cc.Radius,
+	}
+
+	return c, nil
+}
+
+// asleep maps a vehicle api's sleeping response to api.ErrAsleep so the loadpoint
+// can trigger the existing wake-up logic.
+func asleep(err error) error {
+	var se *request.StatusError
+	if !errors.As(err, &se) || !se.HasStatus(http.StatusServiceUnavailable, http.StatusRequestTimeout) {
+		return err
+	}
+
+	var res struct {
+		Error    string
+		Response struct {
+			Reason string
+		}
+	}
+
+	if json.Unmarshal(se.Body(), &res) == nil &&
+		(se.HasStatus(http.StatusServiceUnavailable) && strings.Contains(strings.ToLower(res.Response.Reason), "sleep") ||
+			se.HasStatus(http.StatusRequestTimeout) && strings.Contains(res.Error, "vehicle unavailable")) {
+		return api.ErrAsleep
+	}
+
+	return err
+}
+
+// isVehicleAtHome checks if the vehicle is within the geofence (if enabled)
+func (c *VehicleApi) isVehicleAtHome(vehicle api.Vehicle) (bool, error) {
+	if !c.geofenceEnabled {
+		return true, nil // Assume at charger if geofencing is disabled
+	}
+
+	v, ok := api.Cap[api.VehiclePosition](vehicle)
+	if !ok {
+		return false, errors.New("vehicle must support position tracking if geofence is enabled")
+	}
+
+	lat, lon, err := v.Position()
+	if err != nil {
+		return false, asleep(err)
+	}
+
+	return c.distance(lat, lon) <= c.radius, nil
+}
+
+// Status implements the api.Charger interface
+func (c *VehicleApi) Status() (api.ChargeStatus, error) {
+	if c.lp == nil {
+		return api.StatusA, nil
+	}
+
+	vehicle := c.lp.GetVehicle()
+	if vehicle == nil {
+		return api.StatusA, nil // No vehicle = disconnected
+	}
+
+	// Check if vehicle is at the charger (trying to use geofencing)
+	atHome, err := c.isVehicleAtHome(vehicle)
+	if err != nil {
+		// position unknown while asleep: report connected so the loadpoint wakes the
+		// vehicle, the geofence is re-evaluated once it responds again
+		if errors.Is(err, api.ErrAsleep) {
+			return api.StatusB, nil
+		}
+		return api.StatusA, err
+	}
+
+	if !c.cacheRefreshExpectedAt.IsZero() {
+		if time.Now().Before(c.cacheRefreshExpectedAt) {
+			if !c.enabled {
+				// to avoid charge logic errors while waiting for cache refresh
+				return api.StatusB, nil
+			}
+		} else {
+			util.ResetCached()
+			c.cacheRefreshExpectedAt = time.Time{}
+		}
+	}
+
+	v, ok := api.Cap[api.ChargeState](vehicle)
+	if !ok {
+		return api.StatusA, errors.New("vehicle not capable of reporting charging status")
+	}
+
+	status, err := v.Status()
+	if err != nil {
+		// asleep: report connected so the loadpoint's setLimit path can wake the vehicle
+		if errors.Is(asleep(err), api.ErrAsleep) {
+			return api.StatusB, nil
+		}
+		return api.StatusNone, err
+	}
+
+	if status == api.StatusA || !atHome {
+		return api.StatusA, nil
+	}
+
+	return status, nil
+}
+
+// Enabled implements the api.Charger interface
+func (c *VehicleApi) Enabled() (bool, error) {
+	return verifyEnabled(c, c.enabled)
+}
+
+// Enable implements the api.Charger interface
+func (c *VehicleApi) Enable(enable bool) error {
+	if c.lp == nil {
+		return ErrLoadpointNotInitialized
+	}
+
+	status, err := c.Status()
+	if err != nil {
+		return err
+	}
+
+	// ignore disabling when vehicle is already disconnected
+	if status == api.StatusA && !enable {
+		c.enabled = false
+		return nil
+	}
+
+	v, ok := api.Cap[api.ChargeController](c.lp.GetVehicle())
+	if !ok {
+		return errors.New("vehicle not capable of start/stop")
+	}
+
+	if err := v.ChargeEnable(enable); err != nil {
+		return asleep(err)
+	}
+
+	c.enabled = enable
+	// delayed reset if vehicle cache- allows vehicle APIs to reflect new charging status
+	c.cacheRefreshExpectedAt = time.Now().Add(3 * time.Minute)
+
+	return nil
+}
+
+// MaxCurrent implements the api.Charger interface
+func (c *VehicleApi) MaxCurrent(current int64) error {
+	if c.lp == nil {
+		return ErrLoadpointNotInitialized
+	}
+
+	v, ok := api.Cap[api.CurrentController](c.lp.GetVehicle())
+	if !ok {
+		// If we cannot control the current, we just pretend that we do
+		return nil
+	}
+
+	return asleep(v.MaxCurrent(current))
+}
+
+var _ api.Resurrector = (*VehicleApi)(nil)
+
+// WakeUp implements the api.Resurrector interface
+func (c *VehicleApi) WakeUp() error {
+	if c.lp == nil {
+		return ErrLoadpointNotInitialized
+	}
+
+	v, ok := api.Cap[api.Resurrector](c.lp.GetVehicle())
+	if !ok {
+		return nil
+	}
+
+	return v.WakeUp()
+}
+
+var _ loadpoint.Controller = (*VehicleApi)(nil)
+
+// LoadpointControl implements loadpoint.Controller
+func (c *VehicleApi) LoadpointControl(lp loadpoint.API) {
+	c.lp = lp
+}
+
+// distance approximates Euclidean distance, good enough for geofencing
+func (c *VehicleApi) distance(lat, lon float64) float64 {
+	const metersPerDegreeLat = 111000 // ~111km per degree lat (constant)
+
+	deltaLat := (c.lat - lat) * metersPerDegreeLat
+	deltaLon := (c.lon - lon) * metersPerDegreeLat * math.Cos(c.lat*math.Pi/180) // varies by lat
+
+	return math.Sqrt(deltaLat*deltaLat + deltaLon*deltaLon)
+}

@@ -1,0 +1,127 @@
+package templates
+
+import (
+	_ "embed"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+//go:embed modbus.tpl
+var modbusTmpl string
+
+// ModbusParams adds the modbus parameters' default values
+func (t *Template) ModbusParams(modbusType string, values map[string]any) {
+	if len(t.ModbusChoices()) == 0 {
+		return
+	}
+
+	if modbusType != "" {
+		values[ParamModbus] = modbusType
+	}
+
+	if values[ParamModbus] == nil || values[ParamModbus] == "" {
+		return
+	}
+
+	// check if the modbus params are already added
+	if index, _ := t.ParamByName("id"); index >= 0 {
+		return
+	}
+
+	// skip params the template already defines (e.g. deprecated delay, timeout)
+	modbusParams := slices.DeleteFunc(slices.Clone(ConfigDefaults.Modbus.Types[values[ParamModbus].(string)].Params), func(p Param) bool {
+		i, _ := t.ParamByName(p.Name)
+		return i >= 0
+	})
+
+	// add the modbus params at the beginning
+	t.Params = append(modbusParams, t.Params...)
+}
+
+// ModbusValues adds the values required for modbus.tpl to the value map
+func (t *Template) ModbusValues(renderMode int, values map[string]any) {
+	choices := t.ModbusChoices()
+	if len(choices) == 0 {
+		return
+	}
+
+	// only add the template once, when testing multiple usages, it might already be present
+	if !strings.Contains(t.Render, modbusTmpl) {
+		t.Render = fmt.Sprintf("%s\n%s", t.Render, modbusTmpl)
+	}
+
+	modbusConfig := ConfigDefaults.Modbus
+	_, modbusParam := t.ParamByName(ParamModbus)
+
+	modbusInterfaces := []string{}
+	for _, choice := range choices {
+		modbusInterfaces = append(modbusInterfaces, modbusConfig.Interfaces[choice]...)
+	}
+
+	// set default interface type
+	if len(modbusInterfaces) == 1 {
+		values[ParamModbus] = modbusInterfaces[0]
+	}
+
+	for _, iface := range modbusInterfaces {
+		typeParams := modbusConfig.Types[iface].Params
+
+		for _, p := range typeParams {
+			// don't overwrite custom values. Params the template deprecated in favour
+			// of the modbus definition are pre-populated with an empty string default.
+			if v := values[p.Name]; v != nil {
+				if s, ok := v.(string); !ok || s != "" {
+					continue
+				}
+			}
+
+			values[p.Name] = p.DefaultValue(renderMode)
+
+			var defaultValue string
+
+			switch p.Name {
+			case ModbusParamId:
+				if modbusParam.ID != 0 {
+					defaultValue = strconv.Itoa(modbusParam.ID)
+				}
+			case ModbusParamPort:
+				if modbusParam.Port != 0 {
+					defaultValue = strconv.Itoa(modbusParam.Port)
+				}
+			case ModbusParamBaudrate:
+				if modbusParam.Baudrate != 0 {
+					defaultValue = strconv.Itoa(modbusParam.Baudrate)
+				}
+			case ModbusParamComset:
+				if modbusParam.Comset != "" {
+					defaultValue = modbusParam.Comset
+				}
+			case ModbusParamDelay:
+				if modbusParam.Delay != "" {
+					defaultValue = modbusParam.Delay
+				}
+			case ModbusParamTimeout:
+				if modbusParam.Timeout != "" {
+					defaultValue = modbusParam.Timeout
+				}
+			}
+
+			if defaultValue != "" {
+				// apply the template-specific default to both the render values
+				// (so RenderModeInstance YAML reflects it) and the param definition
+				// (so the Config UI surfaces it as default). The earlier guard above
+				// ensures user-supplied values are not overwritten.
+				values[p.Name] = defaultValue
+				if renderMode == RenderModeInstance {
+					t.SetParamDefault(p.Name, defaultValue)
+				}
+			}
+		}
+
+		if renderMode == RenderModeDocs {
+			values[iface] = true
+		}
+	}
+}

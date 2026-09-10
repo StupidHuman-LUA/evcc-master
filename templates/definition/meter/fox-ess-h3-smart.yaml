@@ -1,0 +1,261 @@
+template: fox-ess-h3-smart
+products:
+  - brand: FoxESS
+    description:
+      generic: H3-Pro/Smart Series Hybrid Inverter
+capabilities: ["battery-control"]
+params:
+  - name: usage
+    choice: ["grid", "pv", "battery"]
+  - name: modbus
+    choice: ["rs485", "tcpip"]
+    id: 247
+  - name: maxacpower
+  - preset: battery-params
+  - name: maxchargepower
+    required: true
+render: |
+  type: custom
+  {{- if eq .usage "grid" }}
+  power:
+    source: calc
+    add:
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 38816 # Meter Power R
+        type: holding
+        decode: int32
+      scale: -0.1
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 38818 # Meter Power S
+        type: holding
+        decode: int32
+      scale: -0.1
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 38820 # Meter Power T
+        type: holding
+        decode: int32
+      scale: -0.1
+  energy:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 39617 # Grid Consumption Total
+      type: holding
+      decode: uint32
+    scale: 0.01
+  {{- end }}
+  {{- if eq .usage "pv" }}
+  power:
+    source: calc
+    add:
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39279 # PV1
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39281 # PV2
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39283 # PV3
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39285 # PV4
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39287 # PV5
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 39289 # PV6
+        type: holding
+        decode: int32
+      block: # 39279-39290
+        register: 39279
+        count: 12
+  maxacpower: {{ .maxacpower }}
+  {{- end }}
+  {{- if eq .usage "battery" }}
+  power:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 39237 # Battery Charge/Discharge
+      type: holding
+      decode: int32
+  soc:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 37612 # Soc
+      type: holding
+      decode: int16
+  batterymode:
+    source: watchdog
+    timeout: 30s
+    reset: 1 # reset to normal mode
+    set:
+      source: switch
+      switch:
+      - case: 1 # normal - disable remote control
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 0 # Disabled
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46001 # Remote Control
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 1 # Self Use
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 49203 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ .minsoc }}
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46609 # Minimum SoC
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ .maxsoc }}
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46610 # Maximum SoC
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ .minsoc }}
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46611 # Minimum SoC On-Grid
+                type: writesingle
+                encoding: uint16
+      - case: 2 # hold - stop battery discharge
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 0 # Disabled: keeping remote control enabled with a 0W active power
+            # target (tried previously) makes the inverter curtail PV production
+            # entirely instead of just holding the battery, confirmed on real
+            # hardware. Stay on plain Self Use and rely solely on the On-Grid SoC
+            # reserve below to block discharge; Work Mode is not locked against
+            # external changes while holding, which is the accepted trade-off.
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46001 # Remote Control
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 1 # Self Use
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 49203 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 100 # blocks discharge regardless of current SoC
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46611 # Minimum SoC On-Grid
+                type: writesingle
+                encoding: uint16
+      - case: 3 # charge - force battery charge
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 3 # Back-up, fallback if the remote control watchdog expires
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 49203 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 60 # Remote timeout 60 seconds
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46002 # Remote Timeout Set
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 1 # Enabled
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46001 # Remote Control
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ mul .maxchargepower -1 }} # negative power means charging
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 46003 # Remote Active Power, int32 across 46003 (high word) and 46004 (low word)
+                type: writemultiple
+                encoding: int32
+  {{- include "battery-params" . }}
+  {{- end }}

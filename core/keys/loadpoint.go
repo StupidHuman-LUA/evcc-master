@@ -1,0 +1,120 @@
+package keys
+
+const (
+	// loadpoint settings
+	Name              = "name"             // loadpoint name (config identifier)
+	Title             = "title"            // loadpoint title
+	Disabled          = "disabled"         // loadpoint disabled via config
+	Mode              = "mode"             // charge mode
+	DefaultMode       = "defaultMode"      // default charge mode
+	AlwaysCharge      = "alwaysCharge"     // smart mode: charge continuously at least at min power (off/on/once)
+	Charger           = "charger"          // charger ref
+	Meter             = "meter"            // meter ref
+	Circuit           = "circuit"          // circuit ref
+	DefaultVehicle    = "vehicle"          // default vehicle ref
+	Priority          = "priority"         // priority
+	MinCurrent        = "minCurrent"       // min current
+	MaxCurrent        = "maxCurrent"       // max current
+	MinSoc            = "minSoc"           // min soc (heating: min temperature)
+	MinSocNotReached  = "minSocNotReached" // min soc not reached
+	LimitSoc          = "limitSoc"         // limit soc
+	LimitEnergy       = "limitEnergy"      // limit energy
+	Soc               = "soc"
+	Thresholds        = "thresholds"
+	UI                = "ui" // display-only ui settings (json)
+	EnableThreshold   = "enableThreshold"
+	DisableThreshold  = "disableThreshold"
+	EnableDelay       = "enableDelay"
+	DisableDelay      = "disableDelay"
+	BatteryBoost      = "batteryBoost"
+	BatteryBoostLimit = "batteryBoostLimit"
+
+	PhasesConfigured = "phasesConfigured" // desired phase mode (0/1/3, 0 = automatic), user selection
+	PhasesActive     = "phasesActive"     // expectedly active phases, taking vehicle into account (1/2/3)
+
+	ChargerIcon         = "chargerIcon"         // charger icon for ui
+	ChargerFeature      = "chargerFeature"      // charger feature
+	ChargerSinglePhase  = "chargerSinglePhase"  // api.PhaseDescriber: charger physical phases, sockets only
+	ChargerPhases1p3p   = "chargerPhases1p3p"   // api.PhaseSwitcher: 1p3p chargers
+	ChargerStatusReason = "chargerStatusReason" // either awaiting authorization or disconnect required
+
+	// loadpoint status
+	Enabled   = "enabled"   // loadpoint enabled
+	Connected = "connected" // connected
+	Charging  = "charging"  // charging
+	Dimmed    = "dimmed"    // dimmed pseudo-status
+
+	// loadpoint setpoint
+	OfferedCurrent = "offeredCurrent" // offered current
+
+	// optimizer
+	Suggestion = "suggestion" // optimizer's advisory suggestion for the current slot
+
+	// smart charging
+	SmartCostActive    = "smartCostActive"    // smart cost active
+	SmartCostLimit     = "smartCostLimit"     // smart cost limit, fast charge when costs are below
+	SmartCostNextStart = "smartCostNextStart" // smart cost next start, time of next fast charging
+	SolarShare         = "solarShare"         // solar share required to start/continue pv charging
+
+	SmartFeedInPriorityActive    = "smartFeedInPriorityActive"    // smart feed-in priority active
+	SmartFeedInPriorityLimit     = "smartFeedInPriorityLimit"     // smart feed-in priority limit, pause self-consumption when feed-in rates are above
+	SmartFeedInPriorityNextStart = "smartFeedInPriorityNextStart" // smart feed-in priority next start, time of next pause
+
+	// effective values
+	EffectivePriority   = "effectivePriority"   // effective priority
+	EffectivePlanId     = "effectivePlanId"     // effective plan id
+	EffectivePlanTime   = "effectivePlanTime"   // effective plan time
+	EffectivePlanSoc    = "effectivePlanSoc"    // effective plan soc
+	EffectiveMinCurrent = "effectiveMinCurrent" // effective min current
+	EffectiveMaxCurrent = "effectiveMaxCurrent" // effective max current
+
+	EffectiveMinSoc       = "effectiveMinSoc"       // effective min soc
+	EffectiveLimitSoc     = "effectiveLimitSoc"     // effective limit soc
+	EffectivePlanStrategy = "effectivePlanStrategy" // effective plan strategy
+
+	// measurements
+	ChargePower       = "chargePower"       // charge power
+	ChargeCurrents    = "chargeCurrents"    // charge currents
+	ChargeVoltages    = "chargeVoltages"    // charge voltages
+	ChargedEnergy     = "chargedEnergy"     // charged energy
+	ChargeDuration    = "chargeDuration"    // charge duration
+	ChargeTotalImport = "chargeTotalImport" // charge meter total import
+	TodayEnergy       = "todayEnergy"       // energy since midnight
+	Last24hEnergy     = "last24hEnergy"     // energy, rolling 24h
+	Last7dEnergy      = "last7dEnergy"      // energy, rolling 7 days
+
+	// session
+	ConnectedDuration       = "connectedDuration"       // connected duration
+	ChargeRemainingDuration = "chargeRemainingDuration" // charge remaining duration
+	ChargeRemainingEnergy   = "chargeRemainingEnergy"   // charge remaining energy
+
+	// plan
+	Plan               = "plan"               // charge plan time slots
+	PlanTime           = "planTime"           // charge plan finish time goal
+	PlanEnergy         = "planEnergy"         // charge plan energy goal
+	PlanSoc            = "planSoc"            // charge plan soc goal
+	PlanActive         = "planActive"         // charge plan has determined current slot to be an active slot
+	PlanProjectedStart = "planProjectedStart" // charge plan start time (earliest slot)
+	PlanProjectedEnd   = "planProjectedEnd"   // charge plan ends (end of last slot)
+	PlanOverrun        = "planOverrun"        // charge plan goal not reachable in time
+	PlanStrategy       = "planStrategy"       // charge plan strategy (precondition, continuous)
+
+	// repeating plans
+	RepeatingPlans = "repeatingPlans" // key to access all repeating plans in db
+
+	// remote control
+	RemoteDisabled       = "remoteDisabled"       // remote disabled
+	RemoteDisabledSource = "remoteDisabledSource" // remote disabled source
+
+	// vehicle
+	VehicleName            = "vehicleName"            // vehicle name
+	VehicleTitle           = "vehicleTitle"           // vehicle title
+	VehicleIdentity        = "vehicleIdentity"        // vehicle identity
+	VehicleDetectionActive = "vehicleDetectionActive" // vehicle detection active
+	VehicleOdometer        = "vehicleOdometer"        // vehicle odometer
+	VehicleRange           = "vehicleRange"           // vehicle range
+	VehicleSoc             = "vehicleSoc"             // vehicle soc
+	VehicleLimitSoc        = "vehicleLimitSoc"        // vehicle api soc limit
+	VehicleClimaterActive  = "vehicleClimaterActive"  // vehicle climater active
+	VehicleWelcomeActive   = "vehicleWelcomeActive"   // vehicle might need welcome charge
+)

@@ -1,0 +1,17 @@
+template: skoda
+covers: ["enyaq"]
+products:
+  - brand: Škoda
+    description:
+      generic: MyŠkoda
+params:
+  - preset: vehicle-base
+  - name: welcomecharge
+    advanced: true
+  - preset: vehicle-online
+  - name: timeout
+render: |
+  type: skoda
+  {{ include "base" . }}
+  timeout: {{ .timeout }}
+  {{ include "features" . }}

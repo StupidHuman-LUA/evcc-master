@@ -1,0 +1,405 @@
+package server
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+
+	"dario.cat/mergo"
+	"github.com/evcc-io/evcc/core"
+	"github.com/evcc-io/evcc/core/loadpoint"
+	coresettings "github.com/evcc-io/evcc/core/settings"
+	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/config"
+	"github.com/evcc-io/evcc/util/templates"
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/gorilla/mux"
+)
+
+func getLoadpointStaticConfig(lp loadpoint.API) loadpoint.StaticConfig {
+	return loadpoint.StaticConfig{
+		Charger: lp.GetChargerRef(),
+		Meter:   lp.GetMeterRef(),
+		Circuit: lp.GetCircuitRef(),
+		Vehicle: lp.GetDefaultVehicleRef(),
+	}
+}
+
+func getLoadpointDynamicConfig(lp loadpoint.API) loadpoint.DynamicConfig {
+	planTime, planEnergy := lp.GetPlanEnergy()
+	return loadpoint.DynamicConfig{
+		Title:                    lp.GetTitle(),
+		DefaultMode:              string(lp.GetDefaultMode()),
+		AlwaysCharge:             string(lp.GetAlwaysCharge()),
+		Priority:                 lp.GetPriority(),
+		PhasesConfigured:         lp.GetPhasesConfigured(),
+		MinCurrent:               lp.GetMinCurrent(),
+		MaxCurrent:               lp.GetMaxCurrent(),
+		SmartCostLimit:           lp.GetSmartCostLimit(),
+		SmartFeedInPriorityLimit: lp.GetSmartFeedInPriorityLimit(),
+		SolarShare:               lp.GetSolarShare(),
+		Thresholds:               lp.GetThresholds(),
+		Soc:                      lp.GetSocConfig(),
+		UI:                       lp.GetUI(),
+		PlanEnergy:               planEnergy,
+		PlanTime:                 planTime,
+		PlanStrategy:             lp.GetPlanStrategy(),
+		BatteryBoostLimit:        lp.GetBatteryBoostLimit(),
+		LimitEnergy:              lp.GetLimitEnergy(),
+		LimitSoc:                 lp.GetLimitSoc(),
+	}
+}
+
+type loadpointFullConfig struct {
+	ID      int    `json:"id,omitempty"` // db row id
+	Name    string `json:"name"`         // either slice index (yaml) or db:<row id>
+	Disable bool   `json:"disable,omitempty"`
+
+	// static config
+	loadpoint.StaticConfig
+	loadpoint.DynamicConfig
+}
+
+func loadpointSplitConfig(r io.Reader) (loadpoint.DynamicConfig, map[string]any, map[string]any, *bool, error) {
+	var payload map[string]any
+
+	if err := jsonDecoder(r).Decode(&payload); err != nil {
+		return loadpoint.DynamicConfig{}, nil, nil, nil, err
+	}
+
+	// nil if not part of the payload- keeps the persisted flag
+	var disable *bool
+	if v, ok := payload["disable"].(bool); ok {
+		disable = &v
+	}
+	delete(payload, "disable")
+	delete(payload, "id")
+	delete(payload, "name")
+
+	dynamic, static, err := loadpoint.SplitConfig(payload)
+	return dynamic, static, payload, disable, err
+}
+
+// setDeviceDisable persists the disable flag on a loadpoint's subdevice
+func setDeviceDisable[T any](name string, h config.Handler[T], disable bool) error {
+	if name == "" {
+		return nil
+	}
+
+	dev, err := configurableDevice(name, h)
+	if err != nil {
+		// static device- cannot persist
+		return nil
+	}
+
+	props := dev.Properties()
+	if props.Disable == disable {
+		return nil
+	}
+	props.Disable = disable
+
+	return dev.Update(dev.Config().Other, dev.Instance(), config.WithProperties(props))
+}
+
+// loadpointConfig returns a single loadpoint's configuration
+func loadpointConfig(dev config.Device[loadpoint.API]) (loadpointFullConfig, error) {
+	var (
+		id      int
+		disable bool
+	)
+	if configurable, ok := dev.(config.ConfigurableDevice[loadpoint.API]); ok {
+		id = configurable.ID()
+		disable = configurable.Properties().Disable
+	}
+
+	lp := dev.Instance()
+
+	// disabled loadpoint has no live instance; decode static config from the database instead
+	if lp == nil {
+		dynamic, staticMap, err := loadpoint.SplitConfig(dev.Config().Other)
+		if err != nil {
+			return loadpointFullConfig{}, err
+		}
+
+		// non-strict: runtime settings (mode, ...) are persisted alongside the config
+		var static loadpoint.StaticConfig
+		if err := mapstructure.Decode(staticMap, &static); err != nil {
+			return loadpointFullConfig{}, err
+		}
+
+		return loadpointFullConfig{
+			ID:            id,
+			Name:          dev.Config().Name,
+			Disable:       disable,
+			StaticConfig:  static,
+			DynamicConfig: dynamic,
+		}, nil
+	}
+
+	res := loadpointFullConfig{
+		ID:            id,
+		Name:          dev.Config().Name,
+		Disable:       disable,
+		StaticConfig:  getLoadpointStaticConfig(lp),
+		DynamicConfig: getLoadpointDynamicConfig(lp),
+	}
+
+	return res, nil
+}
+
+// loadpointsConfigHandler returns a device configurations by class
+func loadpointsConfigHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		devices := config.Loadpoints().Devices()
+
+		res := make([]loadpointFullConfig, 0, len(devices))
+		for _, dev := range devices {
+			c, err := loadpointConfig(dev)
+			if err != nil {
+				jsonError(w, http.StatusBadRequest, err)
+				return
+			}
+
+			res = append(res, c)
+		}
+
+		jsonWrite(w, res)
+	}
+}
+
+// loadpointConfigHandler returns a device configurations by class
+func loadpointConfigHandler() http.HandlerFunc {
+	h := config.Loadpoints()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+
+		id, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		dev, err := h.ByName(config.NameForID(id))
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		res, err := loadpointConfig(dev)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		jsonWrite(w, res)
+	}
+}
+
+// newLoadpointHandler creates a new loadpoint
+func newLoadpointHandler() http.HandlerFunc {
+	h := config.Loadpoints()
+
+	// TODO revert charger, meter etc
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		dynamic, static, _, disable, err := loadpointSplitConfig(r.Body)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		id := len(h.Devices())
+		name := "lp-" + strconv.Itoa(id+1)
+		log := util.NewLoggerWithLoadpoint(name, id+1)
+
+		conf, err := config.AddConfig(templates.Loadpoint, static, config.WithProperties(config.Properties{Disable: disable != nil && *disable}))
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		settings := coresettings.NewConfigSettingsAdapter(log, &conf)
+
+		instance, err := core.NewLoadpointFromConfig(log, settings, nil, static)
+		if err != nil {
+			conf.Delete()
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		dev := config.NewConfigurableDevice[loadpoint.API](&conf, instance)
+		if err := dynamic.Apply(instance); err != nil {
+			conf.Delete()
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		if err := h.Add(dev); err != nil {
+			conf.Delete()
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		setConfigDirty()
+
+		jsonWrite(w, struct {
+			ID int `json:"id"`
+		}{ID: conf.ID})
+	}
+}
+
+// updateLoadpointHandler returns a device configurations by class
+func updateLoadpointHandler() http.HandlerFunc {
+	h := config.Loadpoints()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+
+		id, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		dev, err := h.ByName(config.NameForID(id))
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		configurable, ok := dev.(config.ConfigurableDevice[loadpoint.API])
+		if !ok {
+			jsonError(w, http.StatusBadRequest, errors.New("not configurable"))
+			return
+		}
+
+		dynamic, static, payload, disable, err := loadpointSplitConfig(r.Body)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		props := configurable.Properties()
+		if disable != nil {
+			props.Disable = *disable
+		}
+
+		instance := dev.Instance()
+
+		// merge static config to maintain the dynamic part; without live instance
+		// merge the full payload since dynamic setters cannot persist it
+		src := static
+		if instance == nil {
+			src = payload
+		}
+
+		other := configurable.Config().Other
+		if err := mergo.Merge(&other, src, mergo.WithOverride); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		if err := configurable.Update(other, instance, config.WithProperties(props)); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		// propagate disable to the loadpoint's charger and meter
+		chargerRef, _ := other["charger"].(string)
+		if err := setDeviceDisable(chargerRef, config.Chargers(), props.Disable); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		meterRef, _ := other["meter"].(string)
+		if err := setDeviceDisable(meterRef, config.Meters(), props.Disable); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		// dynamic; instance is nil for a disabled loadpoint, takes effect on next restart
+		if instance != nil {
+			if err := dynamic.Apply(instance); err != nil {
+				jsonError(w, http.StatusBadRequest, err)
+				return
+			}
+		}
+
+		setConfigDirty()
+
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// deleteLoadpointHandler deletes a loadpoint
+func deleteLoadpointHandler() http.HandlerFunc {
+	h := config.Loadpoints()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+
+		id, err := strconv.Atoi(vars["id"])
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		// cleanup references
+		lp, err := configurableDevice(config.NameForID(id), h)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		instance := lp.Instance()
+
+		// disabled loadpoint has no live instance; delete it without ref cleanup
+		if instance == nil {
+			if err := deleteDevice(id, h); err != nil {
+				jsonError(w, http.StatusBadRequest, err)
+				return
+			}
+
+			jsonWrite(w, struct {
+				ID int `json:"id"`
+			}{ID: id})
+
+			return
+		}
+
+		if dev, err := configurableDevice(instance.GetChargerRef(), config.Chargers()); err == nil {
+			if err := deleteDevice(dev.ID(), config.Chargers()); err != nil {
+				jsonError(w, http.StatusBadRequest, err)
+				return
+			}
+
+			setConfigDirty()
+		}
+
+		if dev, err := configurableDevice(instance.GetMeterRef(), config.Meters()); err == nil {
+			if err := deleteDevice(dev.ID(), config.Meters()); err != nil {
+				jsonError(w, http.StatusBadRequest, err)
+				return
+			}
+
+			setConfigDirty()
+		}
+
+		setConfigDirty()
+
+		if err := deleteDevice(id, h); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		res := struct {
+			ID int `json:"id"`
+		}{
+			ID: id,
+		}
+
+		jsonWrite(w, res)
+	}
+}

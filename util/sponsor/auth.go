@@ -1,0 +1,161 @@
+package sponsor
+
+// LICENSE
+
+// Copyright (c) evcc.io (andig, naltatis, premultiply)
+
+// This module is NOT covered by the MIT license. All rights reserved.
+
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/evcc-io/evcc/api/proto/pb"
+	"github.com/evcc-io/evcc/util/cloud"
+	"github.com/evcc-io/evcc/util/machine"
+	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+var (
+	mu             sync.RWMutex
+	Subject, Token string
+	ExpiresAt      time.Time
+)
+
+func machineID() string {
+	return machine.ProtectedID("evcc-sponsor")
+}
+
+const unavailable = "sponsorship unavailable"
+
+// startupTimeout leaves the network time to settle at boot; grpc retries dialing with backoff until deadline
+const startupTimeout = 30 * time.Second
+
+func IsAuthorized() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return len(Subject) > 0
+}
+
+func IsAuthorizedForApi() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return IsAuthorized() && Subject != unavailable && Token != ""
+}
+
+// check and set sponsorship token
+func ConfigureSponsorship(token string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if token == "" {
+		if sub := checkVictron(); sub != "" {
+			Subject = sub
+			return nil
+		}
+
+		if os.Getenv("HEMSPRO") != "" {
+			if sub := checkHemsPro(); sub != "" {
+				Subject = sub
+				return nil
+			}
+		}
+
+		var err error
+		if token, err = checkPulsares(); token == "" || err != nil {
+			return err
+		}
+	}
+
+	Token = token
+
+	// check expiry locally to avoid cloud roundtrip
+	var claims jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(token, &claims); err == nil &&
+		claims.ExpiresAt != nil && claims.ExpiresAt.Before(time.Now()) {
+		return errors.New("token is expired - get a fresh one from https://sponsor.evcc.io")
+	}
+
+	conn, err := cloud.Connection()
+	if err != nil {
+		return err
+	}
+
+	client := pb.NewAuthClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+
+	res, err := client.IsAuthorized(ctx, &pb.AuthRequest{Token: token, MachineId: machineID()}, grpc.WaitForReady(true))
+	if err == nil && res.Authorized {
+		Subject = res.Subject
+		ExpiresAt = res.ExpiresAt.AsTime()
+	}
+
+	if err != nil {
+		if s, ok := status.FromError(err); ok && s.Code() != codes.Unknown {
+			Subject = unavailable
+			err = nil
+		} else {
+			if strings.Contains(err.Error(), "token is expired") {
+				err = fmt.Errorf("%w - get a fresh one from https://sponsor.evcc.io", err)
+			} else {
+				err = fmt.Errorf("sponsortoken: %w", err)
+			}
+		}
+	}
+
+	return err
+}
+
+// redactToken returns a redacted version of the token showing only start and end characters
+func redactToken(token string) string {
+	if len(token) <= 12 {
+		return ""
+	}
+	return token[:6] + "......." + token[len(token)-6:]
+}
+
+type Status struct {
+	Name        string    `json:"name"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	ExpiresSoon bool      `json:"expiresSoon,omitempty"`
+	Token       string    `json:"token,omitempty"`
+}
+
+// RedactedStatus returns the sponsorship status
+func RedactedStatus() Status {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	var expiresSoon bool
+	if d := time.Until(ExpiresAt); d < 30*24*time.Hour && d > 0 {
+		expiresSoon = true
+	}
+
+	return Status{
+		Name:        Subject,
+		ExpiresAt:   ExpiresAt,
+		ExpiresSoon: expiresSoon,
+		Token:       redactToken(Token),
+	}
+}

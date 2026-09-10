@@ -1,0 +1,230 @@
+template: fox-ess-h3
+products:
+  - brand: FoxESS
+    description:
+      generic: H3 Series Hybrid Inverter
+capabilities: ["battery-control"]
+params:
+  - name: usage
+    choice: ["grid", "pv", "battery"]
+  - name: modbus
+    choice: ["rs485", "tcpip"]
+    id: 247
+  - name: maxacpower
+  - preset: battery-params
+  - name: maxchargepower
+    required: true
+  - name: capacity
+    advanced: true
+  - name: minsoc
+    advanced: true
+  - name: maxsoc
+    advanced: true
+render: |
+  type: custom
+  {{- if eq .usage "grid" }}
+  power:
+    source: calc
+    add:
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 31026 # Meter Power R
+        type: holding
+        decode: int16
+      scale: -1
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 31027 # Meter Power S
+        type: holding
+        decode: int16
+      scale: -1
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 31028 # Meter Power T
+        type: holding
+        decode: int16
+      scale: -1
+  energy:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 32012 # Grid Consumption Total
+      type: holding
+      decode: uint32
+    scale: 0.1
+  {{- end }}
+  {{- if eq .usage "pv" }}
+  power:
+    source: calc
+    add:
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 31002 # PV1
+        type: holding
+        decode: int16
+    - source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 31005 # PV2
+        type: holding
+        decode: int16
+  maxacpower: {{ .maxacpower }}
+  {{- end }}
+  {{- if eq .usage "battery" }}
+  power:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 31036 # Battery Charge/Discharge
+      type: holding
+      decode: int16
+  soc:
+    source: modbus
+    {{- include "modbus" . | indent 2 }}
+    register:
+      address: 31038 # Soc
+      type: holding
+      decode: int16
+  limitsoc:
+    source: convert
+    convert: float2int
+    set:
+      source: modbus
+      {{- include "modbus" . | indent 4 }}
+      register:
+        address: 41009 # limit soc
+        type: writesingle
+        decode: uint16
+  batterymode:
+    source: watchdog
+    timeout: 30s
+    reset: 1 # reset to normal mode
+    set:
+      source: switch
+      switch:
+      - case: 1 # normal - disable remote control
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 0 # Disabled
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44000 # Remote Enable
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 0 # Self Use
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 41000 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ .minsoc }}
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 41009 # Minimum SoC
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ .maxsoc }}
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 41010 # Maximum SoC
+                type: writesingle
+                encoding: uint16
+      - case: 2 # hold - stop battery discharge
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 1 # Feed-in First, fallback if the remote control watchdog expires
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 41000 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 60 # Remote timeout 60 seconds
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44001 # Remote Timeout Set
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 1 # Enabled
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44000 # Remote Enable
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 0 # W
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44002 # Remote Active Power
+                type: writemultiple
+                encoding: int32
+      - case: 3 # charge - force battery charge
+        set:
+          source: sequence
+          set:
+          - source: const
+            value: 2 # Back-up, fallback if the remote control watchdog expires
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 41000 # Work Mode
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 60 # Remote timeout 60 seconds
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44001 # Remote Timeout Set
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: 1 # Enabled
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44000 # Remote Enable
+                type: writesingle
+                encoding: uint16
+          - source: const
+            value: {{ mul .maxchargepower -1 }} # negative power means charging
+            set:
+              source: modbus
+              {{- include "modbus" . | indent 12 }}
+              register:
+                address: 44002 # Remote Active Power
+                type: writemultiple
+                encoding: int32
+  {{- include "battery-params" . }}
+  {{- end }}

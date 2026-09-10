@@ -1,0 +1,90 @@
+package tesla
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/oauth"
+	"github.com/evcc-io/evcc/util/request"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
+)
+
+var (
+	mu         sync.Mutex
+	identities = make(map[string]*Identity)
+)
+
+// https://auth.tesla.com/oauth2/v3/.well-known/openid-configuration
+
+// OAuth2Config is the OAuth2 configuration for authenticating with the Tesla API.
+func OAuth2Config(id, secret string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     id,
+		ClientSecret: secret,
+		RedirectURL:  "https://auth.tesla.com/void/callback",
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   "https://auth.tesla.com/en_us/oauth2/v3/authorize",
+			TokenURL:  "https://auth.tesla.com/oauth2/v3/token",
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
+		Scopes: []string{"openid", "email", "offline_access"},
+	}
+}
+
+type Identity struct {
+	oauth2.TokenSource
+	log     *util.Logger
+	oc      *oauth2.Config
+	subject string
+}
+
+func NewIdentity(log *util.Logger, oc *oauth2.Config, token *oauth2.Token) (oauth2.TokenSource, error) {
+	// serialise instance handling
+	mu.Lock()
+	defer mu.Unlock()
+
+	// determine tesla identity
+	var claims jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(token.AccessToken, &claims); err != nil {
+		return nil, err
+	}
+
+	// reuse identity instance
+	if instance := identities[claims.Subject]; instance != nil {
+		return instance, nil
+	}
+
+	if !token.Valid() {
+		token.Expiry = claims.ExpiresAt.Time
+	}
+
+	v := &Identity{
+		log:     log,
+		oc:      oc,
+		subject: claims.Subject,
+	}
+
+	ts, err := oauth.PersistentTokenSource(log, v.settingsKey(), token, v.refreshToken)
+	if err != nil {
+		return nil, err
+	}
+
+	v.TokenSource = ts
+
+	// add instance
+	identities[claims.Subject] = v
+
+	return v, nil
+}
+
+func (v *Identity) settingsKey() string {
+	return fmt.Sprintf("tesla-command.%s", v.subject)
+}
+
+func (v *Identity) refreshToken(token *oauth2.Token) (*oauth2.Token, error) {
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, request.NewClient(v.log))
+	return v.oc.TokenSource(ctx, token).Token()
+}

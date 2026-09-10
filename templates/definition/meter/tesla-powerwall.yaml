@@ -1,0 +1,32 @@
+template: tesla-powerwall
+products:
+  - brand: Tesla
+    description:
+      generic: Powerwall
+params:
+  - name: usage
+    choice: ["grid", "pv", "battery"]
+  - name: host
+  - name: password
+    required: true
+    help:
+      en: Password of the user "customer". By default this is the last 5 characters of password stated on the Tesla Gateway.
+      de: Passwort des Benutzers "Kunde". Default sind die letzten 5 Zeichen des auf dem Tesla Gateway genannten Passworts.
+  - name: refreshToken
+    deprecated: true
+  - name: siteId
+    deprecated: true
+  - name: minsoc
+    deprecated: true
+  - name: maxsoc
+    deprecated: true
+  - name: maxchargepower
+    deprecated: true
+  - name: maxdischargepower
+    deprecated: true
+render: |
+  type: powerwall
+  uri: {{ .host }}
+  usage: {{ .usage }}
+  user: customer
+  password: {{ .password }} # for user 'customer'
